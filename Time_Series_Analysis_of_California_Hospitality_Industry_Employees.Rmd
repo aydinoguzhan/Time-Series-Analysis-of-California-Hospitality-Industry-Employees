@@ -1,0 +1,639 @@
+---
+title: "STAT497 Project"
+author: "Oğuzhan Aydın 236111"
+date: "2023-01-12"
+output: word_document
+---
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r message=FALSE, warning=FALSE}
+library(forecast)
+library(ggplot2)
+library(dplyr)
+library(plotly)
+library(FinTS)
+library(hrbrthemes)
+library(gridExtra)
+library(tseries)
+library(pdR)
+library(fUnitRoots)
+library(uroot)
+library(TSA)
+library(caschrono)
+library(tidyverse)
+library(tibbletime)
+library(anomalize)
+library(chron)
+library(rugarch)
+library(fpp)
+library(stats)
+library(aTSA)
+library(tsibble)
+library(prophet)
+```
+
+# 1.	Time series plot and interpretation 
+
+```{r}
+hospitality <- read.csv("HospitalityEmployees.csv")
+hospitality$Date <- as.Date(hospitality$Date,format = "%m/%d/%Y")
+str(hospitality)
+hospitality2 <- ts(hospitality[,2], start =c(1990,1), frequency = 12)
+tail(hospitality2,5)
+```
+
+
+```{r}
+autoplot(hospitality2, main = "Time Series Plot of Hospitality Employees") + theme_bw()
+```
+Series is not stationary in mean. There is an increasing trend. Also, it seems that there is seasonality. 
+
+```{r}
+hospitality3 <-hospitality %>% dplyr::mutate(year = lubridate::year(Date), month = lubridate::month(Date))
+hospitality3$month<-as.factor(hospitality3$month)
+hospitality3$year<-as.factor(hospitality3$year)
+ggplot(hospitality3, aes(x=month, y=Employees, fill=month)) + 
+  geom_boxplot()+
+  labs(title="Boxplot Across Months",x="Month", y = "Employees")
+```
+Since the median values for each month is not equal, it appears that we have a seasonal component each year. Also, we see that there are no outliers present on a monthly basis.
+
+```{r}
+ggplot(hospitality3, aes(x=year, y=Employees, fill=year)) + 
+  geom_boxplot()+
+  labs(title="Boxplot Across Yeasr",x="year", y = "Employees")
+```
+We can see that there is a increasing trend. Also, there are some outliers on a yearly basis.  
+
+
+# Anomaly Detection  
+```{r}
+stl_data = stl(hospitality2, t.window=13, s.window="periodic", robust=TRUE)
+autoplot(stl_data,col="red")+theme_minimal()
+```
+In the first plot, there is an increasing trend implying the nonstationarity. Also, there is a seasonal pattern.  
+Second plot, There is increasing trend in the series.  
+Third plot, The is seasonal pattern in the series because the series repeat itself at definite time periods.  
+Fourh plot shows that there exists some outliers in the series.
+
+
+```{r message=FALSE, warning=FALSE}
+df <- as_tsibble(hospitality2)
+df <- data.frame(date=as.Date((df$index)), Value=df$value)
+df <- df %>% 
+  tibbletime::as_tbl_time(index = date)
+df %>% 
+  time_decompose(Value, method = "stl", frequency = "auto", trend = "auto") %>%
+  anomalize(remainder, method = "gesd", alpha = 0.05, max_anoms = 0.2) %>%
+  plot_anomaly_decomposition()
+
+```
+Plots show that we have anomalies, so we need to get rid of them.  
+
+```{r}
+hosp_clean <- tsclean(hospitality2)
+
+autoplot(hosp_clean)
+```
+The series is not stationary. There exists seasonality and stochastic trend.
+
+# 2.	Cross-validation
+```{r}
+train <- window(hosp_clean,end=c(2017,12))
+test <- window(hosp_clean,start=c(2018,1))
+```
+
+#3.	Box-Cox transformation analysis
+```{r}
+lambda <- BoxCox.lambda(train)
+train_trans_clean <- BoxCox(train, lambda)
+```
+Lambda value is 0.0976. We may use log transformation.  
+
+# Plots and Tests
+
+```{r message=FALSE, warning=FALSE}
+p1<-ggAcf(train_trans_clean,main="ACF of Hospitality") + theme_bw()
+p2<-ggPacf(train_trans_clean,main="PACF of Hospitality") + theme_bw()
+grid.arrange(p1,p2,nrow=1)
+```
+There is slow linear decay in ACF plot which indicates that the series is not stationary. Now, check the related tests.  
+
+```{r message=FALSE, warning=FALSE}
+tseries::kpss.test(train_trans_clean, null=c("Level"))
+```
+Reject H0. KPSS test suggest that the Process is not stationary.
+
+```{r message=FALSE, warning=FALSE}
+tseries::kpss.test(train_trans_clean, null=c("Trend"))
+```
+Reject H0. KPSS Test also suggests that there exists stochastic process. We need to use differencing.
+```{r message=FALSE, warning=FALSE}
+out<-HEGY.test(wts=train_trans_clean, itsd=c(1,1,0), regvar=0, selectlags=list(mode="signf", Pmax=NULL))
+out$stats
+
+```
+Hegy test suggests that the system has both regular unit root and seasonal unit root.
+
+```{r}
+mean(train_trans_clean)
+```
+Since it is not close to 0, we use type="c" for ADF test.
+```{r}
+adfTest(train_trans_clean, lags=1, type="c")
+```
+Fail to reject H0. ADF test suggest that The series is not stationary.
+
+```{r}
+ndiffs(train_trans_clean)
+nsdiffs(train_trans_clean)
+```
+We should take one regular difference and one seasonal difference.
+
+
+```{r}
+dif_train <- diff(train_trans_clean) 
+autoplot(dif_train, main = "Time Series Plot of Differenced Data Set") + theme_bw()
+```
+  
+The plot shows that series is stationary around zero. However, variability is high. Now, look at the tests.
+
+```{r message=FALSE, warning=FALSE}
+p1<-ggAcf(dif_train,main="ACF of Differenced Hospitality", lag.max = 60) + theme_bw()
+p2<-ggPacf(dif_train,main="PACF of Differenced Hospitality", lag.max = 60) + theme_bw()
+grid.arrange(p1,p2,nrow=1)
+
+```
+  
+There is a slow linear decay in the seasonal lags of ACF Plot. It indicates that there might be seasonal unit root.
+
+```{r}
+mean(dif_train)
+```
+Mean is close to 0
+```{r message=FALSE, warning=FALSE}
+tseries::pp.test(dif_train)
+```
+Reject H0. pp-test suggests that process is stationary.
+```{r message=FALSE, warning=FALSE}
+tseries::kpss.test(dif_train,null=c("Level"))
+```
+Fail to Reject H0. KPSS test suggest that the Process is stationary.
+
+```{r message=FALSE, warning=FALSE}
+out<-HEGY.test(wts=dif_train, itsd=c(1,0,0), regvar=0, selectlags=list(mode="signf", Pmax=NULL))
+out$stats
+
+```
+Hegy test suggests that the system has both regular and seasonal unit root.
+
+```{r message=FALSE, warning=FALSE}
+dif_train <- diff(diff(train),12)
+```
+
+```{r message=FALSE, warning=FALSE}
+out<-HEGY.test(wts=dif_train, itsd=c(0,0,0), regvar=0, selectlags=list(mode="signf", Pmax=NULL))
+out$stats
+```
+There is no regular unit root and seasonal unit root in the system.
+
+```{r message=FALSE, warning=FALSE}
+ch.test(dif_train, sid = c(1:12))
+```
+Fail to reject null hypothesis. The seasonal pattern is purely deterministic and stationary.
+
+```{r}
+autoplot(dif_train, main = "Time Series Plot of Differenced Data") + theme_bw()
+```
+The series is stationary around zero. Still it has high variability.
+
+
+```{r message=FALSE, warning=FALSE}
+p1<-ggAcf(dif_train,main="ACF of Hospitality", lag.max = 60) + theme_bw()
+p2<-ggPacf(dif_train,main="PACF of Hospitality", lag.max = 60) + theme_bw()
+grid.arrange(p1,p2,nrow=1)
+```
+
+* Possible models are:  
+  + SARIMA(2,1,2)(2,1,1)[12] 
+  + SARIMA(2,1,2)(2,1,0)[12] 
+  + SARIMA(2,1,2)(0,1,1)[12] 
+  + SARIMA(5,1,2)(0,1,1)[12] 
+  + SARIMA(0,1,5)(2,1,1)[12]
+
+
+#Diagnostic Checking
+```{r}
+fit1 <- Arima(train_trans_clean,order = c(2, 1, 2), seasonal = c(2,1,1))
+summary(fit1) # Not Significant
+
+fit2 <- Arima(train_trans_clean,order = c(2, 1, 2), seasonal = c(2,1,0))
+summary(fit2) # Significant
+
+fit3 <- Arima(train_trans_clean,order = c(2, 1, 2), seasonal = c(0,1,1))
+summary(fit3) # Significant
+
+fit4 <- Arima(train_trans_clean,order = c(5, 1, 2), seasonal = c(0,1,1))
+summary(fit4) # Not Significant
+
+fit5 <- Arima(train_trans_clean,order = c(0, 1, 5), seasonal = c(2,1,1))
+summary(fit5) # Not Significant
+
+fit.auto <- auto.arima(train_trans_clean) #Suggests SARIMA(5,1,3)(2,1,1)[12]
+summary(fit.auto) # Not Significant
+```
+  
+  Fit 2 and Fit 3 are significant. Fit 3 has the lowest AIC value. Therefore, I choose SARIMA(2,1,2)(0,1,1)[12]
+
+```{r message=FALSE, warning=FALSE}
+
+r=resid(fit3)
+autoplot(r)+geom_line(y=0)+theme_minimal()+ggtitle("Plot of The Residuals")
+
+par(mfrow=c(1,3))
+plot(window(rstandard(fit3),start=c(1990,1)), ylab='Standardized Residuals')
+a <- ggAcf(as.vector(window(rstandard(fit3),start=c(1990,1))), lag.max=60, main = "ACF Plot of Standardized Residuals") + theme_bw()
+b <- ggPacf(as.vector(window(rstandard(fit3),start=c(1990,1))), lag.max=60, main = "PACF Plot of Standardized Residuals") + theme_bw()
+grid.arrange(a,b,nrow=1)
+
+```
+Residuals are scattered around zero and it can be interpreted as zero mean. Variability is high.
+
+```{r message=FALSE, warning=FALSE}
+ggplot(rstandard(fit3), aes(sample = rstandard(fit3))) +stat_qq()+geom_qq_line()+ggtitle("QQ Plot of the Residuals")+theme_minimal()
+
+```
+  
+QQ Plot exhibits S-shaped. Seems symmetric however there exists outliers.
+QQ Plot shows that the residuals of the model seems to have light tailed distribution
+
+```{r message=FALSE, warning=FALSE}
+ggplot(r,aes(x=r))+geom_histogram(bins=20)+geom_density()+ggtitle("Histogram of Residuals")+theme_minimal()
+
+```
+
+Histogram of the residuals shows that they might have a symmetric distribution
+
+```{r}
+jarque.bera.test(rstandard(fit3))
+```
+```{r}
+shapiro.test(rstandard(fit3))
+```
+P-value for both test is smaller than 0.05. Meaning residuals are not normally distributed. We should make a transformation on residuals.
+
+
+```{r message=FALSE, warning=FALSE}
+ggAcf(as.vector(r),main="ACF of the Residuals",lag = 48)+theme_minimal() 
+```
+There are some significant spikes that are out of WN band. It might be the indication of autocorrelation.
+
+```{r}
+m = lm(r ~ 1+zlag(r))
+bgtest(m,order=15)
+```
+P-value is higher than 0.05. Meaning that there is no serial correlation among residuals.
+
+```{r}
+Box.test(r,lag=15,type = c("Ljung-Box"))
+```
+Since p value is greater than alpha, we have 95% confident that the residuals of the model are uncorrelated
+
+```{r}
+Box.test(r,lag=15,type = c("Box-Pierce"))
+```
+Since p value is greater than alpha, we have 95% confident that the residuals of the model are uncorrelated
+
+```{r}
+rr=r^2
+g1<-ggAcf(as.vector(rr))+theme_minimal()+ggtitle("ACF of Squared Residuals")
+g2<-ggPacf(as.vector(rr))+theme_minimal()+ggtitle("PACF of Squared Residuals")
+grid.arrange(g1,g2,ncol=2)
+```
+  
+There are some significant spikes that are out of WN band in ACF/PACF plots. It might be indication of heteroscedasticity.
+
+```{r}
+m = lm(r ~ train_trans_clean+zlag(train_trans_clean)+zlag(train_trans_clean,2))
+bptest(m)
+```
+```{r}
+m1 = lm(r ~ train_trans_clean+zlag(train_trans_clean)+zlag(train_trans_clean,2)+zlag(train_trans_clean)^2+zlag(train_trans_clean,2)^2+zlag(train_trans_clean)*zlag(train_trans_clean,2))
+bptest(m1)
+```
+
+```{r}
+ArchTest(r)
+```
+Since p-value is smaller than 0.05, we have enough evidence to claim that there is heteroscedasticity problem.
+
+```{r}
+arch.fit <- arima(train_trans_clean,order = c(2,1,2),seasonal = c(0,1,1))
+arch.test(arch.fit)
+```
+The error variance is not constant. Residuals are heteroscedastic. ARCH(lag) effects are present. It should be modelled.  
+The high values in the lower and upper extremes destroy the normality due to high variation. Most probably normality test on residuals will fail.
+
+
+
+> Normality Assumption has failed.
+> Serial Correlation Assumption is successful. There is no serial correlation among residuals.
+> Homoscedasticity Assumption has failed. There exists heteroscedasticity.
+
+
+# Forecasting  
+
+## ARIMA Forecasting
+```{r}
+f1 <- forecast::forecast(fit3, h=12)
+f11<-InvBoxCox(f1$mean,lambda) #Back Transformation
+summary(f1)
+accuracy(f11,test)
+```
+
+## Exponential Smoothing Methods 
+
+```{r}
+hosp.hw <- ets(train, model = "ZZZ")
+summary(hosp.hw)
+
+hosp.f1 <- forecast::forecast(hosp.hw, h = 12)
+autoplot(hosp.f1)
+
+accuracy(hosp.f1,test)
+shapiro.test(hosp.hw$residuals) # Do not follow the normal distribution.
+jarque.bera.test(hosp.hw$residuals)
+```
+## TBats
+```{r}
+tbatsmodel <- tbats(train)
+(tbatsmodel)
+autoplot(train,main="TS plot of Train with TBATS Fitted") +autolayer(fitted(tbatsmodel), series="Fitted") +theme_minimal()
+tbats_forecast <- forecast::forecast(tbatsmodel,h=12)
+autoplot(tbats_forecast)+autolayer(test,series="actual",color="red")+theme_minimal()
+accuracy(tbats_forecast,test)
+shapiro.test(tbats_forecast$residuals)
+jarque.bera.test(tbats_forecast$residuals)
+```
+##Forecasting with Neural Network
+
+```{r message=FALSE, warning=FALSE}
+nnmodel1<-nnetar(train, size = 20, repeats = 10)
+nnmodel1
+nnforecast1 <- forecast::forecast(nnmodel1,h=12,PI=TRUE)
+accuracy(nnforecast1,test)
+```
+
+```{r message=FALSE, warning=FALSE}
+nnmodel2<-nnetar(train, size = 10, repeats = 20,lambda = "auto")
+nnmodel2
+nnforecast2 <- forecast::forecast(nnmodel2,h=12,PI=TRUE)
+accuracy(nnforecast2,test)
+```
+
+```{r message=FALSE, warning=FALSE}
+nnmodel3<-nnetar(train, repeats = 10, size = 40, lambda = "auto")
+nnmodel3
+nnforecast3 <- forecast::forecast(nnmodel3,h=12,PI=TRUE)
+accuracy(nnforecast3,test)
+```
+
+```{r message=FALSE, warning=FALSE}
+nnmodel4<-nnetar(train, size = 30, repeats = 20, lambda = "auto")
+nnmodel4
+nnforecast4 <- forecast::forecast(nnmodel4,h=12,PI=TRUE)
+accuracy(nnforecast4,test)
+```
+
+```{r message=FALSE, warning=FALSE}
+nnmodel5<-nnetar(train, repeats = 10, size = 30,lambda = "auto")
+nnmodel5
+nnforecast5 <- forecast::forecast(nnmodel5,h=12,PI=TRUE)
+accuracy(nnforecast5,test)
+```
+```{r message=FALSE, warning=FALSE}
+nnmodel6<-nnetar(train, repeats = 5, size = 40, lambda = "auto")
+nnmodel6
+nnforecast6 <- forecast::forecast(nnmodel6,h=12,PI=TRUE)
+accuracy(nnforecast6,test)
+```
+
+```{r message=FALSE, warning=FALSE}
+nnmodel<-nnetar(train)
+nnmodel
+nnforecast <- forecast::forecast(nnmodel,h=12,PI=TRUE)
+accuracy(nnforecast,test)
+```
+NNETAR model with repeats equals 10 and size equals 30 has the lowest RMSE and MAPE value. Therefore, I choose this for forecasting.
+
+```{r}
+shapiro.test(nnforecast5$residuals) #Not follow normal distribution
+```
+
+
+```{r message=FALSE, warning=FALSE}
+autoplot(train)+autolayer(fitted(nnmodel5))+theme_minimal()+ggtitle("Fitted Values of NN Model")
+autoplot(nnforecast5)+theme_minimal()
+```
+
+##Prophet
+```{r message=FALSE, warning=FALSE}
+ds<-c(seq(as.Date("1990/01/01"),as.Date("2017/12/01"),by="month"))
+df<-data.frame(ds,y=as.numeric(train))
+```
+
+```{r message=FALSE, warning=FALSE}
+train_prophet <- prophet(df)
+future<-make_future_dataframe(train_prophet,periods = 12)
+forecast <- predict(train_prophet, future)
+accuracy(tail(forecast$yhat,12),test) # Test Accuracy
+accuracy(head(forecast$yhat,336),train) # Train Accuracy
+```
+
+```{r message=FALSE, warning=FALSE}
+train_prophet1 <- prophet(df, changepoint.prior.scale = 1, seasonality.prior.scale = 50, changepoint.range = 0.9)
+future1<-make_future_dataframe(train_prophet1,periods = 12)
+forecast1 <- predict(train_prophet1, future1)
+accuracy(tail(forecast$yhat,12),test) 
+```
+
+```{r message=FALSE, warning=FALSE}
+train_prophet2 <- prophet(df, changepoint.prior.scale = 0.5, seasonality.prior.scale = 1, changepoint.range = 0.7)
+future2<-make_future_dataframe(train_prophet2,periods = 12)
+forecast2 <- predict(train_prophet2, future2)
+accuracy(tail(forecast$yhat,12),test)
+```
+
+```{r message=FALSE, warning=FALSE}
+train_prophet3 <- prophet(df, changepoint.prior.scale = 2.4, seasonality.prior.scale = 800, changepoint.range = 1)
+future3<-make_future_dataframe(train_prophet3,periods = 12)
+forecast3 <- predict(train_prophet3, future3)
+accuracy(tail(forecast3$yhat,12),test)
+```
+
+```{r message=FALSE, warning=FALSE}
+train_prophet4 <- prophet(df, changepoint.prior.scale = 0.2, seasonality.prior.scale = 0.005, changepoint.range = 0.9)
+future4<-make_future_dataframe(train_prophet4,periods = 12)
+forecast4 <- predict(train_prophet4, future4)
+accuracy(tail(forecast4$yhat,12),test)
+```
+
+```{r message=FALSE, warning=FALSE}
+train_prophet5 <- prophet(df,changepoint.prior.scale = 8, seasonality.prior.scale = 700, changepoint.range = 1)
+future5<-make_future_dataframe(train_prophet5,periods = 12)
+forecast5 <- predict(train_prophet5, future5)
+accuracy(tail(forecast5$yhat,12),test)
+```
+Prophet value with default values has lowest RMSE and MAPE value. Choose this one.
+
+```{r}
+trainprop <- head(forecast$yhat,336) #Fitted values of prophet obtained by train set
+residualprop <- train - trainprop #Residual is calculated by y-yhat
+shapiro.test(residualprop) #Residuals do not follow the normal distribution
+```
+
+```{r}
+plot(train_prophet, forecast)+theme_minimal()
+prophet_plot_components(train_prophet, forecast)
+```
+
+
+
+Based on the accuracy measures; RMSE and MAPE values, I would prefer *ETS > TBATS > NNETAR > ARIMA > Prophet*, respectively.  
+Holt-Winter’s Seasonal Method - Exponential Smoothing Method has the best fit for our data.
+
+
+
+```{r}
+autoplot(hosp.f1,main="Exponential Smoothing Methods") + autolayer(fitted(hosp.f1), series="Fitted") + autolayer(hosp.f1$mean, color ="red") + autolayer(test,series="actual",color="black")
+```
+
+```{r}
+autoplot(tbats_forecast,main="Exponential Smoothing Methods") + autolayer(fitted(tbats_forecast), series="Fitted") + autolayer(tbats_forecast$mean, color ="red") + autolayer(test,series="actual",color="black")
+```
+
+```{r message=FALSE, warning=FALSE}
+autoplot(nnforecast,main="Exponential Smoothing Methods") + autolayer(fitted(nnforecast), series="Fitted") + autolayer(nnforecast$mean, color ="red") + autolayer(test,series="actual",color="black")
+```
+
+
+
+## Forecast Plot
+
+```{r}
+########### ARIMA FORECAST
+
+plot(hospitality2, lwd = 2, main = "SARIMA(2,1,2)(0,1,1)[12]", xlim = c(1990, 2019)) 
+lines(InvBoxCox(f1$fitted, lambda), col = "purple", lty = 2, lwd = 2) 
+abline(v = c(2018, 1), col = "red", lwd = 2) 
+lines(InvBoxCox(f1$mean, lambda), col = "blue", lty = 1, lwd = 2) 
+LI <- ts(InvBoxCox(f1$lower[, 2], lambda), start = c(2018,1), frequency = 12) 
+UI <- ts(InvBoxCox(f1$upper[, 2], lambda), start = c(2018, 1), frequency = 12) 
+lines(LI, col = "green", lty = 2, lwd = 2) 
+lines(UI, col = "green", lty = 2, lwd = 2) 
+legend("topleft", 
+       legend = c("Series", "Fitted Values", "Point Forecast",
+                  "95% Prediction Interval", "Forecast Origin"), 
+       col = c("black", "purple", "blue", "green", "red"), 
+       lty = c(1, 2, 1, 2, 2, 1), 
+       lwd = c(2, 2, 2, 2, 2, 2), 
+       cex = 0.6)
+
+```
+
+
+```{r}
+
+############### ETS FORECAST
+
+plot(hospitality2, lwd = 2, main = "ETS") 
+lines(hosp.f1$fitted, col = "purple", lty = 2, lwd = 2) 
+abline(v = c(2018, 1), col = "red", lwd = 2) 
+lines(hosp.f1$mean, col = "blue", lty = 1, lwd = 2) 
+LI <- ts(hosp.f1$lower[, 2], start = c(2018, 1), frequency = 12) 
+UI <- ts(hosp.f1$upper[, 2], start = c(2018, 1), frequency = 12) 
+lines(LI, col = "green", lty = 2, lwd = 2) 
+lines(UI, col = "green", lty = 2, lwd = 2) 
+legend("topleft", 
+       legend = c("Series", "Fitted Values", "Point Forecast",
+                  "95% Prediction Interval", "Forecast Origin"), 
+       col = c("black", "purple", "blue", "green", "red"), 
+       lty = c(1, 2, 1, 2, 2, 1), 
+       lwd = c(2, 2, 2, 2, 2, 2), 
+       cex = 0.6)
+
+```
+
+
+
+```{r}
+
+############### PROPHET FORECAST
+
+plot(hospitality2, lwd = 2, main = "Prophet")
+lines(ts(forecast$yhat[1:336], start = c(1990), frequency = 12), col = "purple", lty = 2, lwd = 2)
+abline(v = c(2018, 1), col = "red", lwd = 2)
+lines(ts(forecast$yhat[337:348], start = c(2018, 1), frequency = 12), col = "blue", lty = 1, lwd = 2)
+LI <- ts(forecast$yhat_lower[337:348], start = c(2018, 1), frequency = 12)
+UI <- ts(forecast$yhat_upper[337:348], start = c(2018, 1), frequency = 12)
+lines(LI, col = "green", lty = 2, lwd = 2)
+lines(UI, col = "green", lty = 2, lwd = 2)
+legend("topleft", 
+       legend = c("Series", "Fitted Values", "Point Forecast",
+                  "95% Prediction Interval","Forecast Origin"),
+       col = c("black", "purple", "blue", "green", "red"),
+       lty = c(1,2,1,2,2,1),
+       lwd = c(2,2,2,2,2,2),
+       cex = 0.6)
+
+```
+
+
+```{r}
+
+############# TBATS
+plot(hospitality2, lwd = 2, main = "TBATS")
+lines(tbats_forecast$fitted, col = "purple", lty = 2, lwd = 2) 
+abline(v = c(2018, 1), col = "red", lwd = 2) 
+lines(tbats_forecast$mean, col = "blue", lty = 1, lwd = 2) 
+LI <- ts(tbats_forecast$lower[, 2], start = c(2018, 1), frequency = 12) 
+UI <- ts(tbats_forecast$upper[, 2], start = c(2018, 1), frequency = 12) 
+lines(LI, col = "green", lty = 2, lwd = 2) 
+lines(UI, col = "green", lty = 2, lwd = 2) 
+legend("topleft", 
+       legend = c("Series", "Fitted Values", "Point Forecast",
+                  "95% Prediction Interval", "Forecast Origin"), 
+       col = c("black", "purple", "blue", "green", "red"), 
+       lty = c(1, 2, 1, 2, 2, 1), 
+       lwd = c(2, 2, 2, 2, 2, 2), 
+       cex = 0.6)
+
+
+```
+
+
+```{r}
+
+############# NNETAR
+
+plot(hospitality2, lwd = 2, main = "Neural Network")
+lines(nnforecast5$fitted, col = "purple", lty = 2, lwd = 2) 
+abline(v = c(2018, 1), col = "red", lwd = 2) 
+lines(nnforecast5$mean, col = "blue", lty = 1, lwd = 2) 
+LI <- ts(nnforecast5$lower[, 2], start = c(2018, 1), frequency = 12) 
+UI <- ts(nnforecast5$upper[, 2], start = c(2018, 1), frequency = 12) 
+lines(LI, col = "green", lty = 2, lwd = 2) 
+lines(UI, col = "green", lty = 2, lwd = 2) 
+legend("topleft", 
+       legend = c("Series", "Fitted Values", "Point Forecast",
+                  "95% Prediction Interval", "Forecast Origin"), 
+       col = c("black", "purple", "blue", "green", "red"), 
+       lty = c(1, 2, 1, 2, 2, 1), 
+       lwd = c(2, 2, 2, 2, 2, 2), 
+       cex = 0.6)
+```
+
